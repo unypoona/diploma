@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Достопримечательности рядом</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <style>
+    .poi-button {
+        width: 100%;
+        max-width: 400px;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    #map {
+        height: 400px;
+        width: 100%;
+        margin-top: 20px;
+    }
+
+    /* Изменение цвета кнопок на мягкий зеленый */
+    .btn-info {
+        background-color: #66CDAA;
+        border-color: #66CDAA;
+        color: white;
+    }
+
+    </style>
+
+</head>
+<body>
+<div class="container py-5">
+    <h1 class="text-center">Найдите достопримечательности рядом</h1>
+
+    <!-- Проверка, авторизован ли пользователь -->
+    {% if user.is_authenticated %}
+    <p class="text-center">Привет, {{ user.username }}! <a href="{% url 'logout' %}">Выйти</a></p>
+
+    <div class="text-center">
+        <button id="send-my-location" class="btn btn-primary m-2">Отправить свою геолокацию</button>
+    </div>
+
+    <!-- Форма для ручного ввода координат -->
+    <div id="manual-location" class="mt-3 text-center">
+        <form id="manual-form" class="form-inline">
+            <input type="number" step="any" id="latitude" placeholder="Широта" class="form-control m-1" required>
+            <input type="number" step="any" id="longitude" placeholder="Долгота" class="form-control m-1" required>
+            <button type="submit" class="btn btn-success m-1">Отправить указанную геолокацию</button>
+        </form>
+    </div>
+
+    <!-- Фильтр для выбора автора описания -->
+    <div class="text-center">
+        <label for="author-select">Выберите автора:</label>
+        <select id="author-select" class="form-select w-50 mx-auto">
+            <option value="">Все авторы</option>
+            {% for author in authors %}
+            <option value="{{ author.id }}">{{ author.name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <!-- Карта для отображения местоположения -->
+    <div id="map"></div>
+
+    <!-- Контейнер для отображения деталей достопримечательности -->
+    <div id="poi-details"></div>
+
+    <!-- Контейнер для кнопок с достопримечательностями -->
+    <div id="poi-buttons" class="mt-4"></div>
+
+    <!-- Если пользователь не авторизован -->
+    {% else %}
+    <p class="text-center">Вы не авторизованы. <a href="{% url 'login' %}">Войти</a> или <a href="{% url 'register' %}">Зарегистрироваться</a></p>
+    {% endif %}
+</div>
+
+<script>
+    let map;
+    let marker;
+
+    {% if user.is_authenticated %}
+    $(document).ready(function() {
+        // Инициализация карты с центральной точкой на Эрмитаже (Санкт-Петербург)
+        map = L.map('map').setView([59.9398, 30.3146], 13);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 18,
+        }).addTo(map);
+
+        // Обработка кликов на карту для установки маркера
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+            placeMarker(lat, lng);
+        });
+
+        // Обработка кнопки для получения текущей геолокации пользователя
+        $("#send-my-location").click(function() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(function(position) {
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+                    placeMarker(lat, lng);
+                    getPOIs(lat, lng);
+                }, function() {
+                    alert("Не удалось получить вашу геолокацию.");
+                });
+            } else {
+                alert("Ваш браузер не поддерживает геолокацию.");
+            }
+        });
+
+        // Обработка формы для ручного ввода координат
+        $("#manual-form").submit(function(event) {
+            event.preventDefault();
+            const lat = parseFloat($("#latitude").val());
+            const lng = parseFloat($("#longitude").val());
+            placeMarker(lat, lng);
+            getPOIs(lat, lng);
+        });
+
+        // Функция для установки маркера на карте
+        function placeMarker(lat, lng) {
+            if (marker) {
+                marker.setLatLng([lat, lng]);
+            } else {
+                marker = L.marker([lat, lng], {color: 'red'}).addTo(map);
+            }
+            $("#latitude").val(lat);
+            $("#longitude").val(lng);
+            map.setView([lat, lng], 13);
+        }
+
+        // Функция для получения списка достопримечательностей через AJAX
+        function getPOIs(latitude, longitude) {
+            const authorId = $("#author-select").val();  // Получаем ID выбранного автора
+
+            $.ajax({
+                url: "/",
+                type: "POST",
+                data: {
+                    'latitude': latitude,
+                    'longitude': longitude,
+                    'author_id': authorId,  // Передаем ID автора
+                    'action': 'get_pois',
+                    'csrfmiddlewaretoken': '{{ csrf_token }}'
+                },
+                success: function(response) {
+                    $("#poi-buttons").empty();
+                    $("#poi-details").empty();
+                    if (response.pois && response.pois.length > 0) {
+                        response.pois.forEach(function(poi) {
+                            $("#poi-buttons").append(`
+                                <button class="btn btn-info m-1 poi-button" data-name="${poi.name}">
+                                    ${poi.name} — ${poi.address}
+                                </button>
+                            `);
+                        });
+
+                        // Обработка нажатия на кнопки достопримечательностей
+                        $(".poi-button").click(function() {
+                            const placeName = $(this).data("name");
+                            const selectedAuthorId = $("#author-select").val();
+                            getPOIDescription(placeName, selectedAuthorId);
+                        });
+                    } else {
+                        $("#poi-buttons").append("<p>Достопримечательности не найдены.</p>");
+                    }
+                },
+                error: function() {
+                    alert("Ошибка при получении данных.");
+                }
+            });
+        }
+
+        // Функция для получения описания выбранной достопримечательности через AJAX
+        function getPOIDescription(placeName, selectedAuthorId) {
+            $.ajax({
+                url: "/get_poi_description/",
+                type: "POST",
+                data: {
+                    'place_name': placeName,
+                    'author_id': selectedAuthorId,  // Передаем ID автора
+                    'action': 'get_poi_description',
+                    'csrfmiddlewaretoken': '{{ csrf_token }}'
+                },
+                success: function(response) {
+                    $("#poi-details").html(`
+                        <h3>${placeName}</h3>
+                        <p>${response.description}</p>
+                        <p><strong>Автор: ${response.author_name}</strong></p>
+                        <img src="${response.image_url}" alt="Изображение достопримечательности" class="img-fluid">
+                    `);
+                },
+                error: function() {
+                    alert("Ошибка при получении описания.");
+                }
+            });
+        }
+    });
+    {% endif %}
+</script>
+
+<!-- Bootstrap JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
